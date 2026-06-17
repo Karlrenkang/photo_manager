@@ -14,6 +14,7 @@ SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
 def scan_images(folder_path: str) -> List[Path]:
     """
     扫描指定文件夹，返回所有支持的图片文件路径列表
+    排除 duplicates 文件夹中的文件
 
     参数:
         folder_path: 要扫描的文件夹路径
@@ -35,6 +36,11 @@ def scan_images(folder_path: str) -> List[Path]:
     for file_path in folder.rglob('*'):
         # 只处理文件
         if file_path.is_file():
+            # 排除 duplicates 文件夹中的文件
+            # 检查路径的任何部分是否为 'duplicates'
+            if 'duplicates' in file_path.parts:
+                continue
+
             # 检查扩展名是否支持
             if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 image_files.append(file_path)
