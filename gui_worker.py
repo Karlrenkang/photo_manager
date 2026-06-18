@@ -13,6 +13,7 @@ from core.scanner import scan_folder
 from core.index_builder import build_index
 from core.group_engine import group_by_md5
 from core.deduper import HistoryDB, process_groups
+from utils.paths import get_base_dir, get_history_db_path
 
 
 MSG_LOG = "log"
@@ -52,8 +53,8 @@ class ScanWorker:
 
     def _run(self):
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            db_path = os.path.join(base_dir, "storage", "history_db.json")
+            base_dir = get_base_dir()
+            db_path = get_history_db_path()
             duplicates_dir = os.path.join(self.input_folder, "Duplicates")
             scanned_dir = os.path.join(self.input_folder, "Scanned")
 

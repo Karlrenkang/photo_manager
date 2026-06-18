@@ -21,11 +21,11 @@ from tkinter import filedialog, messagebox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gui_worker import ScanWorker, MSG_LOG, MSG_PROGRESS, MSG_RESULT, MSG_ERROR, MSG_DONE
+from utils.paths import get_history_db_path
 
 # Default paths
 DEFAULT_INPUT = ""
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HISTORY_DB_PATH = os.path.join(BASE_DIR, "storage", "history_db.json")
+HISTORY_DB_PATH = get_history_db_path()
 
 
 # ============================================================

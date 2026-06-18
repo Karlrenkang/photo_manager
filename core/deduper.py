@@ -43,6 +43,7 @@ class HistoryDB:
         """
         try:
             self.db.update({h: True for h in self.new_hashes})
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             with open(self.db_path, 'w', encoding='utf-8') as f:
                 json.dump(self.db, f, indent=2)
             self.new_hashes.clear()
@@ -55,6 +56,7 @@ class HistoryDB:
         try:
             self.db = {}
             self.new_hashes.clear()
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             with open(self.db_path, 'w', encoding='utf-8') as f:
                 json.dump(self.db, f, indent=2)
             return True
