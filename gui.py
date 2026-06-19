@@ -572,13 +572,15 @@ class MainWindow(ctk.CTk):
                         self.status_label.configure(text="已终止")
                     self.scan_btn.configure(text="▶  开始扫描", fg_color="#3B82F6")
 
-                # ── Similar scan messages ─
+                # ─ Similar scan messages ─
                 elif msg_type == "similar_progress":
                     _, stage, current, total, text = msg
                     if total > 0:
                         pct = current / total
+                        self.similar_progress_bar.set(pct)
                         self.similar_percent_label.configure(text=f"{int(pct * 100)}%")
                     self.similar_status_label.configure(text=f"{stage}: {text}")
+                    self.update_idletasks()  # 强制刷新UI，解决进度卡住
 
                 elif msg_type == "similar_done":
                     success, summary = msg[1], msg[2]

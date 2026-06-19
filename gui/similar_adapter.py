@@ -110,7 +110,10 @@ class SimilarAdapter:
 
             self.engine.run(progress_callback=on_progress)
 
-            # 扫描完成 → 缓存统计数据
+            # 扫描完成 → 清理空的 group 文件夹（历史遗留或本次产生）
+            self.clean_all_empty_group_dirs(source_dir)
+
+            # 缓存统计数据
             self._cached_summary = self.engine.get_summary()
             self.progress_queue.put(("similar_done", True, self._cached_summary))
 
@@ -179,6 +182,10 @@ class SimilarAdapter:
         # 从 CSV 中移除已还原的记录
         remaining = [r for r in records if r["group_id"] != group_id]
         self._write_csv_records(csv_path, remaining)
+
+        # 清理该分组的空文件夹
+        if self.engine:
+            self.clean_empty_group_dir(str(self.engine.source_dir), group_id)
 
         self.invalidate_cache()
 
@@ -262,6 +269,88 @@ class SimilarAdapter:
         """动态获取当前相册的 similar_photos 归档目录路径。"""
         return os.path.join(source_dir, "similar_photos")
 
+    def get_groups_from_directory(self, source_dir: str) -> List[Dict]:
+        """
+        从 similar_photos 目录结构解析分组列表（CSV 为空时的兜底方案）。
+
+        遍历 similar_photos/group_xxx/ 文件夹，将每个非空文件夹解析为一个分组。
+        文件夹内的文件即为副本，keeper 从源目录推断。
+        """
+        if not source_dir:
+            return []
+
+        archive = Path(source_dir) / "similar_photos"
+        if not archive.exists() or not archive.is_dir():
+            return []
+
+        groups = []
+        for item in sorted(archive.iterdir()):
+            if not item.is_dir() or not item.name.startswith("group_"):
+                continue
+
+            files = [f for f in item.iterdir() if f.is_file()]
+            if not files:
+                continue  # 跳过空文件夹
+
+            duplicates = []
+            for f in files:
+                duplicates.append({
+                    "original_path": "",  # 无法从目录推断原始路径
+                    "moved_path": str(f),
+                    "timestamp": "",
+                })
+
+            # 尝试推断 keeper
+            keeper_path = self._find_keeper_from_moved(duplicates, source_dir)
+
+            groups.append({
+                "group_id": item.name,
+                "total": len(files) + 1,
+                "keeper_path": keeper_path,
+                "dup_count": len(files),
+                "duplicates": duplicates,
+            })
+
+        return groups
+
+    def _find_keeper_from_moved(self, duplicates: List[Dict], source_dir: str) -> str:
+        """从源目录推断 keeper（未被移动的最大文件）。"""
+        if not duplicates:
+            return ""
+
+        # 从 moved_path 推断原始文件名模式
+        first_moved = duplicates[0]["moved_path"]
+        filename = os.path.basename(first_moved)
+
+        # 在源目录中查找同名或相似文件
+        src = Path(source_dir)
+        candidates = []
+        try:
+            for f in src.rglob("*"):
+                if not f.is_file():
+                    continue
+                if "similar_photos" in str(f):
+                    continue
+                if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp", ".tiff", ".tif"):
+                    continue
+                # 排除已移动的副本
+                moved_paths = {d["moved_path"] for d in duplicates}
+                if str(f) in moved_paths:
+                    continue
+                try:
+                    size = f.stat().st_size
+                    candidates.append((str(f), size))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if not candidates:
+            return ""
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0]
+
     # ───────────────────────────────────────────────────────
     # 缩略图
     # ───────────────────────────────────────────────────────
@@ -321,7 +410,7 @@ class SimilarAdapter:
             pass
 
     def _parse_groups(self, records: List[Dict]) -> List[Dict]:
-        """从 CSV 记录解析分组列表。"""
+        """从 CSV 记录解析分组列表，包含 keeper_path。"""
         group_map: Dict[str, Dict] = {}
 
         for rec in records:
@@ -329,7 +418,7 @@ class SimilarAdapter:
             if gid not in group_map:
                 group_map[gid] = {
                     "group_id": gid,
-                    "keeper": "",
+                    "keeper_path": "",
                     "duplicates": [],
                 }
             group_map[gid]["duplicates"].append({
@@ -338,20 +427,64 @@ class SimilarAdapter:
                 "timestamp": rec["timestamp"],
             })
 
-        # 计算总数和保留图（未出现在 CSV 中的同组图片即为 keeper）
+        # 尝试从源目录推断 keeper_path（未被移动的同组最大文件）
         groups = []
         for gid, data in sorted(group_map.items()):
             dup_count = len(data["duplicates"])
-            total = dup_count + 1  # keeper + duplicates
+            total = dup_count + 1
+
+            # 推断 keeper：取第一个副本的原始目录，找最大文件
+            keeper_path = self._find_keeper(data["duplicates"])
+
             groups.append({
                 "group_id": gid,
                 "total": total,
-                "keeper": "",  # keeper 未移动，无路径记录
+                "keeper_path": keeper_path,
                 "dup_count": dup_count,
                 "duplicates": data["duplicates"],
             })
 
         return groups
+
+    def _find_keeper(self, duplicates: List[Dict]) -> str:
+        """从副本原始目录中推断 keeper 路径（未被移动的最大文件）。"""
+        if not duplicates:
+            return ""
+        # 取第一个副本的原始目录
+        first_orig = duplicates[0]["original_path"]
+        src_dir = os.path.dirname(first_orig)
+        if not os.path.isdir(src_dir):
+            return ""
+
+        # 收集该目录下所有图片文件
+        candidates = []
+        try:
+            for f in os.listdir(src_dir):
+                fp = os.path.join(src_dir, f)
+                if os.path.isfile(fp) and f.lower().endswith(
+                    (".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp", ".tiff", ".tif")
+                ):
+                    # 排除已在 similar_photos 中的文件
+                    if "similar_photos" in fp:
+                        continue
+                    # 排除已移动的副本
+                    moved_paths = {d["original_path"] for d in duplicates}
+                    if fp in moved_paths:
+                        continue
+                    try:
+                        size = os.path.getsize(fp)
+                        candidates.append((fp, size))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if not candidates:
+            return ""
+
+        # 按体积降序，取最大的作为 keeper
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0][0]
 
     # ───────────────────────────────────────────────────────
     # CSV 导出
@@ -363,10 +496,39 @@ class SimilarAdapter:
         try:
             with open(dest_path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
-                writer.writerow(["分组ID", "组内总数", "移出副本数", "副本路径"])
+                writer.writerow(["分组ID", "组内总数", "保留原图", "移出副本数", "副本路径"])
                 for g in groups:
                     for dup in g["duplicates"]:
-                        writer.writerow([g["group_id"], g["total"], g["dup_count"], dup["moved_path"]])
+                        writer.writerow([
+                            g["group_id"], g["total"], g["keeper_path"],
+                            g["dup_count"], dup["moved_path"],
+                        ])
             return True
         except Exception:
             return False
+
+    # ───────────────────────────────────────────────────────
+    # 空目录清理
+    # ─────────────────────────────────────────────────────
+
+    def clean_empty_group_dir(self, source_dir: str, group_id: str):
+        """清理指定分组的空文件夹。还原本组后调用，避免残留空 group_xxx 目录。"""
+        group_path = Path(source_dir) / "similar_photos" / group_id
+        try:
+            if group_path.exists() and group_path.is_dir():
+                if not any(group_path.iterdir()):
+                    group_path.rmdir()
+        except Exception:
+            pass
+
+    def clean_all_empty_group_dirs(self, source_dir: str):
+        """清理 similar_photos 下所有空分组文件夹。"""
+        archive = Path(source_dir) / "similar_photos"
+        try:
+            if archive.exists() and archive.is_dir():
+                for item in archive.iterdir():
+                    if item.is_dir() and item.name.startswith("group_"):
+                        if not any(item.iterdir()):
+                            item.rmdir()
+        except Exception:
+            pass
