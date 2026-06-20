@@ -31,58 +31,107 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _hover_windows = {}  # 防止重复创建
 
+_zoom_states = {}    # 缩放状态记录
+
 def show_hover_preview(image_path: str, anchor_widget):
     """
-    鼠标悬停时显示放大预览窗口。
+    鼠标悬停时显示放大预览窗口，支持滚轮缩放。
 
-    - 预览尺寸：最大 800x800
-    - 窗口位置：屏幕右侧
-    - 鼠标离开锚点时自动关闭
+    - 初始预览尺寸：最大 800x800
+    - 窗口位置：屏幕右侧居中
+    - 鼠标离开锚点或预览窗时自动关闭
+    - 滚轮缩放：0.1x ~ 5x
+    - 点击预览窗关闭
     """
     if image_path in _hover_windows:
         return  # 已存在，不重复创建
-
     if not os.path.exists(image_path):
         return
 
+    orig_img = None
     try:
         from PIL import Image, ImageTk
         orig_img = Image.open(image_path)
 
-        # 缩放到最大 800x800
+        # 初始缩放到最大 800x800
         max_size = 800
-        orig_img.thumbnail((max_size, max_size), Image.LANCZOS)
+        preview_img = orig_img.copy()
+        preview_img.thumbnail((max_size, max_size), Image.LANCZOS)
 
         # 创建预览窗口
         win = tk.Toplevel()
         win.title("预览")
+        win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg="#1a1a1a")
 
         # 计算位置（屏幕右侧居中）
         screen_w = win.winfo_screenwidth()
         screen_h = win.winfo_screenheight()
-        x = screen_w - orig_img.width - 100
-        y = (screen_h - orig_img.height) // 2
-        win.geometry(f"{orig_img.width + 20}x{orig_img.height + 60}+{x}+{y}")
+        x = screen_w - preview_img.width - 100
+        y = max(0, (screen_h - preview_img.height) // 2)
+        win.geometry(f"{preview_img.width + 20}x{preview_img.height + 60}+{x}+{y}")
 
         # 显示图片
-        canvas = tk.Canvas(win, bg="#1a1a1a", highlightthickness=0,
-                           width=orig_img.width, height=orig_img.height)
-        canvas.pack(padx=10, pady=(10, 0))
+        pv_canvas = tk.Canvas(win, bg="#1a1a1a", highlightthickness=0,
+                              width=preview_img.width, height=preview_img.height)
+        pv_canvas.pack(padx=10, pady=(10, 0))
 
-        photo = ImageTk.PhotoImage(orig_img)
-        canvas.create_image(0, 0, anchor="nw", image=photo)
-        canvas._photo_ref = photo  # 防止 GC
+        photo = ImageTk.PhotoImage(preview_img)
+        pv_canvas.create_image(0, 0, anchor="nw", image=photo)
+        pv_canvas._photo_ref = photo  # 防止 GC
 
-        # 显示文件名
+        # 显示文件名和缩放比例
         name = os.path.basename(image_path)
-        tk.Label(win, text=name[:40], fg="#9CA3AF", bg="#1a1a1a",
-                 font=("Segoe UI", 10)).pack(pady=(5, 10))
+        info_frame = tk.Frame(win, bg="#1a1a1a")
+        info_frame.pack(fill="x", padx=10, pady=(5, 10))
+        tk.Label(info_frame, text=name[:40], fg="#9CA3AF", bg="#1a1a1a",
+                 font=("Segoe UI", 10)).pack(side="left")
+        scale_label = tk.Label(info_frame, text="100%", fg="#6B7280", bg="#1a1a1a",
+                                font=("Segoe UI", 9))
+        scale_label.pack(side="right")
 
         _hover_windows[image_path] = win
+        _zoom_states[image_path] = {
+            "orig_img": orig_img,
+            "scale": 1.0,
+            "canvas": pv_canvas,
+            "scale_label": scale_label,
+            "win": win,
+        }
 
-        # 绑定离开事件 — 鼠标离开锚点时关闭
+        # ── 滚轮缩放 ──
+        def on_mousewheel(event):
+            state = _zoom_states.get(image_path)
+            if not state:
+                return
+            if event.delta > 0:
+                state["scale"] *= 1.15
+            else:
+                state["scale"] *= 0.87
+            state["scale"] = max(0.1, min(state["scale"], 5.0))
+            _render_zoom(image_path)
+
+        def _render_zoom(img_path):
+            state = _zoom_states.get(img_path)
+            if not state:
+                return
+            s = state["scale"]
+            orig = state["orig_img"]
+            new_w = max(1, int(orig.width * s))
+            new_h = max(1, int(orig.height * s))
+            scaled = orig.resize((new_w, new_h), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(scaled)
+            c = state["canvas"]
+            c.delete("all")
+            c.create_image(0, 0, anchor="nw", image=photo)
+            c._photo_ref = photo
+            c.config(width=new_w, height=new_h)
+            state["scale_label"].config(text=f"{int(s * 100)}%")
+            win = state["win"]
+            win.geometry(f"{new_w + 20}x{new_h + 60}")
+
+        # 绑定离开事件 —— 鼠标离开锚点或预览窗时关闭
         def close_preview(event=None):
             if image_path in _hover_windows:
                 try:
@@ -90,26 +139,31 @@ def show_hover_preview(image_path: str, anchor_widget):
                 except Exception:
                     pass
                 del _hover_windows[image_path]
+            if image_path in _zoom_states:
+                del _zoom_states[image_path]
 
         anchor_widget.bind("<Leave>", lambda e: close_preview(), add="+")
+        pv_canvas.bind("<MouseWheel>", on_mousewheel)
+        pv_canvas.bind("<Leave>", lambda e: close_preview())
+        pv_canvas.bind("<Button-1>", lambda e: close_preview())
+        win.bind("<MouseWheel>", on_mousewheel)
+        win.bind("<Leave>", lambda e: close_preview())
+        win.bind("<Button-1>", lambda e: close_preview())
 
     except Exception as e:
-        print(f"Preview error: {e}")
-
-        anchor_widget.bind("<Leave>", lambda e: close_preview(), add="+")
-        win.bind("<Leave>", lambda e: close_preview())
-        win.bind("<Button-1>", lambda e: close_preview())  # 点击也关闭
-
-    except Exception:
         pass
-
 
 def hide_hover_preview(image_path: str):
     """关闭悬停预览窗口。"""
     if image_path in _hover_windows:
-        _hover_windows[image_path].destroy()
-        del _hover_windows[image_path]
-
+        try:
+            _hover_windows[image_path].destroy()
+        except Exception:
+            pass
+        if image_path in _hover_windows:
+            del _hover_windows[image_path]
+    if image_path in _zoom_states:
+        del _zoom_states[image_path]
 
 # ============================================================
 # 复核标签页
@@ -304,6 +358,7 @@ class ReviewTab(ctk.CTkFrame):
             self.selected_single_img = None
             self._selected_frame = None  # 重置选中 frame
             self.undo_file_btn.configure(state="disabled")
+            self._render_table(groups)  # 刷新表格高亮选中的行
             self._render_preview(group)
             self.undo_group_btn.configure(state="normal")
             self.undo_file_btn.configure(state="disabled")
@@ -312,6 +367,10 @@ class ReviewTab(ctk.CTkFrame):
         """渲染预览区：上方原图 + 下方副本。"""
         self.keeper_canvas.delete("all")
         self._clear_dup_scroll()
+        # 清除旧绑定，防止事件堆积导致图像不刷新
+        self.keeper_canvas.unbind("<Enter>")
+        self.keeper_canvas.unbind("<Leave>")
+        self.keeper_canvas.unbind("<Button-1>")
 
         # ── 上方：原图 ──
         keeper_path = group.get("keeper_path", "")
@@ -321,6 +380,7 @@ class ReviewTab(ctk.CTkFrame):
                 photo = ImageTk.PhotoImage(thumb)
                 self.keeper_canvas.create_image(10, 10, anchor="nw", image=photo)
                 self.keeper_canvas._keeper_photo = photo
+                self.keeper_canvas.update_idletasks()  # 强制刷新画布
 
                 # 悬停预览
                 self.keeper_canvas.bind("<Enter>",
@@ -366,12 +426,20 @@ class ReviewTab(ctk.CTkFrame):
                 canvas.bind("<Leave>",
                     lambda e, p=moved_path: hide_hover_preview(p))
                 canvas.bind("<Button-3>",
-                    lambda e, p=original_path: self._select_single(p, frame))
+                    lambda e, p=original_path, f=frame: self._select_single(p, f))
                 frame.bind("<Button-3>",
                     lambda e, p=original_path, f=frame: self._select_single(p, f))
             else:
                 ctk.CTkLabel(self.dup_scroll, text=f"[无预览] {os.path.basename(original_path)}",
                               text_color="#6B7280").pack(anchor="w", padx=8, pady=4)
+
+            # 删除按钮
+            del_btn = ctk.CTkButton(
+                self.dup_scroll, text="X", width=32, height=32,
+                fg_color="#7F1D1D", hover_color="#991B1B",
+                command=lambda p=moved_path if thumb else original_path: self._delete_image(p),
+            )
+            del_btn.pack(side="right", padx=(2, 0))
 
     def _select_single(self, path: str, frame=None):
         """选中单张图片用于还原 — 边框变蓝高亮。"""
@@ -379,6 +447,7 @@ class ReviewTab(ctk.CTkFrame):
         if self._selected_frame and self._selected_frame != frame:
             try:
                 self._selected_frame.configure(border_color="#4B5563", border_width=2)
+                self._selected_frame.update_idletasks()
             except Exception:
                 pass
 
@@ -386,10 +455,33 @@ class ReviewTab(ctk.CTkFrame):
         if frame:
             frame.configure(border_color="#3B82F6", border_width=3)
             self._selected_frame = frame
+            frame.update_idletasks()
 
         self.selected_single_img = path
         self.undo_file_btn.configure(state="normal")
         self._log(f"选中单张: {os.path.basename(path)}")
+
+    def _delete_image(self, image_path: str):
+        """删除选中的副本图片（带确认对话框）。"""
+        if not image_path or not os.path.exists(image_path):
+            messagebox.showwarning("提示", "文件不存在，无法删除。")
+            return
+
+        fname = os.path.basename(image_path)
+        ok = messagebox.askyesno(
+            "确认删除",
+            f"确定要永久删除此图片吗？\n\n{fname}\n\n此操作不可撤销。",
+            icon="warning",
+        )
+        if not ok:
+            return
+
+        try:
+            os.remove(image_path)
+            self._log(f"已删除: {fname}")
+            self.load_data()  # 刷新分组列表
+        except Exception as e:
+            messagebox.showerror("删除失败", f"无法删除文件: {e}")
 
     def _clear_preview(self):
         """清空预览区。"""
