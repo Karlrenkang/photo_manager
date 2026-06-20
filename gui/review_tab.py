@@ -26,103 +26,89 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ============================================================
-# 放大预览弹窗
+# 悬停预览窗口
 # ============================================================
 
-def open_image_zoom_window(image_path: str):
-    """
-    打开独立全屏放大预览窗口。
+_hover_windows = {}  # 防止重复创建
 
-    功能：
-    - 加载原图真实尺寸
-    - 滚轮缩放（0.1x ~ 5x）
-    - 鼠标拖拽平移
-    - ESC / 关闭按钮关闭窗口
-    - 原图丢失时弹窗警告
+def show_hover_preview(image_path: str, anchor_widget):
     """
+    鼠标悬停时显示放大预览窗口。
+
+    - 预览尺寸：最大 800x800
+    - 窗口位置：屏幕右侧
+    - 鼠标离开锚点时自动关闭
+    """
+    if image_path in _hover_windows:
+        return  # 已存在，不重复创建
+
     if not os.path.exists(image_path):
-        messagebox.showwarning("无法放大", f"图片文件已被移动/删除，无法放大：\n{image_path}")
         return
 
     try:
+        from PIL import Image, ImageTk
         orig_img = Image.open(image_path)
-    except Exception as e:
-        messagebox.showwarning("无法放大", f"图片无法读取：{e}")
-        return
 
-    zoom_win = tk.Toplevel()
-    zoom_win.title(f"放大预览 - {os.path.basename(image_path)}")
-    zoom_win.geometry("1200x800")
-    zoom_win.configure(bg="#1a1a1a")
-    zoom_win.bind("<Escape>", lambda e: zoom_win.destroy())
+        # 缩放到最大 800x800
+        max_size = 800
+        orig_img.thumbnail((max_size, max_size), Image.LANCZOS)
 
-    # 画布
-    canvas = tk.Canvas(zoom_win, bg="#1a1a1a", highlightthickness=0)
-    canvas.pack(fill="both", expand=True)
+        # 创建预览窗口
+        win = tk.Toplevel()
+        win.title("预览")
+        win.attributes("-topmost", True)
+        win.configure(bg="#1a1a1a")
 
-    # 初始显示
-    scale = 1.0
-    img_id = [None]  # 用列表存储以便闭包修改
+        # 计算位置（屏幕右侧居中）
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = screen_w - orig_img.width - 100
+        y = (screen_h - orig_img.height) // 2
+        win.geometry(f"{orig_img.width + 20}x{orig_img.height + 60}+{x}+{y}")
 
-    def _render(s):
-        new_w = max(1, int(orig_img.width * s))
-        new_h = max(1, int(orig_img.height * s))
-        scaled = orig_img.resize((new_w, new_h), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(scaled)
-        canvas.delete("all")
-        img_id[0] = canvas.create_image(0, 0, anchor="nw", image=photo)
+        # 显示图片
+        canvas = tk.Canvas(win, bg="#1a1a1a", highlightthickness=0,
+                           width=orig_img.width, height=orig_img.height)
+        canvas.pack(padx=10, pady=(10, 0))
+
+        photo = ImageTk.PhotoImage(orig_img)
+        canvas.create_image(0, 0, anchor="nw", image=photo)
         canvas._photo_ref = photo  # 防止 GC
 
-    _render(scale)
+        # 显示文件名
+        name = os.path.basename(image_path)
+        tk.Label(win, text=name[:40], fg="#9CA3AF", bg="#1a1a1a",
+                 font=("Segoe UI", 10)).pack(pady=(5, 10))
 
-    # 滚轮缩放
-    def zoom(event):
-        nonlocal scale
-        if event.delta > 0:
-            scale *= 1.15
-        else:
-            scale *= 0.87
-        scale = max(0.1, min(scale, 5.0))
-        _render(scale)
+        _hover_windows[image_path] = win
 
-    canvas.bind("<MouseWheel>", zoom)
-    canvas.bind("<Button-4>", lambda e: zoom(tk.Event(type="MouseWheel", delta=120)))
-    canvas.bind("<Button-5>", lambda e: zoom(tk.Event(type="MouseWheel", delta=-120)))
+        # 绑定离开事件 — 鼠标离开锚点时关闭
+        def close_preview(event=None):
+            if image_path in _hover_windows:
+                try:
+                    _hover_windows[image_path].destroy()
+                except Exception:
+                    pass
+                del _hover_windows[image_path]
 
-    # 拖拽平移
-    drag_state = {"x": 0, "y": 0, "active": False}
+        anchor_widget.bind("<Leave>", lambda e: close_preview(), add="+")
 
-    def drag_start(event):
-        drag_state["x"] = event.x
-        drag_state["y"] = event.y
-        drag_state["active"] = True
+    except Exception as e:
+        print(f"Preview error: {e}")
 
-    def drag_move(event):
-        if not drag_state["active"]:
-            return
-        dx = event.x - drag_state["x"]
-        dy = event.y - drag_state["y"]
-        canvas.move(img_id[0], dx, dy)
-        drag_state["x"] = event.x
-        drag_state["y"] = event.y
+        anchor_widget.bind("<Leave>", lambda e: close_preview(), add="+")
+        win.bind("<Leave>", lambda e: close_preview())
+        win.bind("<Button-1>", lambda e: close_preview())  # 点击也关闭
 
-    def drag_end(event):
-        drag_state["active"] = False
+    except Exception:
+        pass
 
-    canvas.bind("<ButtonPress-1>", drag_start)
-    canvas.bind("<B1-Motion>", drag_move)
-    canvas.bind("<ButtonRelease-1>", drag_end)
 
-    # 底部控制栏
-    ctrl_frame = tk.Frame(zoom_win, bg="#2d2d2d")
-    ctrl_frame.pack(fill="x", side="bottom")
-
-    tk.Label(ctrl_frame, text=f"{orig_img.width} x {orig_img.height} px",
-             fg="#9CA3AF", bg="#2d2d2d", font=("Segoe UI", 10)).pack(side="left", padx=12, pady=8)
-
-    ctk.CTkButton(ctrl_frame, text="关闭", width=100, height=30,
-                   command=zoom_win.destroy,
-                   fg_color="#4B5563", hover_color="#6B7280").pack(side="right", padx=12, pady=6)
+def hide_hover_preview(image_path: str):
+    """关闭悬停预览窗口。"""
+    if image_path in _hover_windows:
+        _hover_windows[image_path].destroy()
+        del _hover_windows[image_path]
 
 
 # ============================================================
@@ -139,6 +125,7 @@ class ReviewTab(ctk.CTkFrame):
         self.selected_group: Optional[str] = None
         self.selected_single_img: Optional[str] = None  # 当前选中单张图片路径
         self.current_scan_dir: str = ""
+        self._selected_frame = None  # 当前选中的副本 frame（用于边框高亮）
 
         self._build_ui()
 
@@ -212,9 +199,16 @@ class ReviewTab(ctk.CTkFrame):
         self.keeper_frame.pack(fill="x", padx=12, pady=(0, 8))
 
         self.keeper_canvas = ctk.CTkCanvas(
-            self.keeper_frame, height=200, bg="#111827", highlightthickness=0,
+            self.keeper_frame, height=180, bg="#111827", highlightthickness=0,
         )
-        self.keeper_canvas.pack(fill="x", padx=8, pady=8)
+        self.keeper_canvas.pack(fill="x", padx=8, pady=(8, 4))
+
+        # 原图文件名标签
+        self.keeper_name_label = ctk.CTkLabel(
+            self.keeper_frame, text="", font=ctk.CTkFont(size=11),
+            text_color="#34D399", anchor="w",
+        )
+        self.keeper_name_label.pack(fill="x", padx=12, pady=(0, 8))
 
         # 下方：副本预览
         bot_label = ctk.CTkLabel(right, text="相似副本（已移入 similar_photos）",
@@ -272,17 +266,24 @@ class ReviewTab(ctk.CTkFrame):
         self._log(f"加载 {len(groups)} 个相似分组")
 
     def _render_table(self, groups):
-        """渲染分组表格 — 精简三列。"""
+        """渲染分组表格 — 精简三列，选中行高亮。"""
         self.table_text.configure(state="normal")
         self.table_text.delete("1.0", "end")
 
+        # 配置 tag 颜色（通过底层 tkinter Text widget）
+        tw = self.table_text._textbox
+        tw.tag_configure("header", foreground="#9CA3AF")
+        tw.tag_configure("selected", foreground="#3B82F6")
+        tw.tag_configure("normal", foreground="#E5E7EB")
+
         header = f"{'ID':<10} {'总':>3}  {'副本':>3}\n"
-        self.table_text.insert("end", header)
-        self.table_text.insert("end", "─" * 20 + "\n")
+        self.table_text.insert("end", header, "header")
+        self.table_text.insert("end", "─" * 20 + "\n", "header")
 
         for g in groups:
             line = f"{g['group_id']:<10} {g['total']:>3}  {g['dup_count']:>3}\n"
-            self.table_text.insert("end", line)
+            tag = "selected" if g["group_id"] == self.selected_group else "normal"
+            self.table_text.insert("end", line, tag)
 
         self.table_text.configure(state="disabled")
         self.table_text.bind("<Button-1>", self._on_table_click)
@@ -301,6 +302,8 @@ class ReviewTab(ctk.CTkFrame):
             group = groups[row_idx]
             self.selected_group = group["group_id"]
             self.selected_single_img = None
+            self._selected_frame = None  # 重置选中 frame
+            self.undo_file_btn.configure(state="disabled")
             self._render_preview(group)
             self.undo_group_btn.configure(state="normal")
             self.undo_file_btn.configure(state="disabled")
@@ -319,12 +322,19 @@ class ReviewTab(ctk.CTkFrame):
                 self.keeper_canvas.create_image(10, 10, anchor="nw", image=photo)
                 self.keeper_canvas._keeper_photo = photo
 
-                # 左键放大
-                self.keeper_canvas.bind("<Button-1>",
-                    lambda e, p=keeper_path: open_image_zoom_window(p))
+                # 悬停预览
+                self.keeper_canvas.bind("<Enter>",
+                    lambda e, p=keeper_path: show_hover_preview(p, self.keeper_canvas))
+                self.keeper_canvas.bind("<Leave>",
+                    lambda e, p=keeper_path: hide_hover_preview(p))
+
+            # 显示文件名
+            keeper_name = os.path.basename(keeper_path)
+            self.keeper_name_label.configure(text=f"✓ {keeper_name}")
         else:
-            self.keeper_canvas.create_text(160, 100,
+            self.keeper_canvas.create_text(160, 90,
                 text="原始原图已丢失", fill="#6B7280", font=("Segoe UI", 12))
+            self.keeper_name_label.configure(text="")
 
         # ── 下方：副本 ──
         for dup in group["duplicates"]:
@@ -350,30 +360,36 @@ class ReviewTab(ctk.CTkFrame):
                 ctk.CTkLabel(frame, text=name[:25], font=ctk.CTkFont(size=10),
                               text_color="#9CA3AF").pack(side="left", padx=8)
 
-                # 左键放大，右键选中
-                canvas.bind("<Button-1>",
-                    lambda e, p=moved_path: open_image_zoom_window(p))
+                # 悬停预览，右键选中
+                canvas.bind("<Enter>",
+                    lambda e, p=moved_path: show_hover_preview(p, canvas))
+                canvas.bind("<Leave>",
+                    lambda e, p=moved_path: hide_hover_preview(p))
                 canvas.bind("<Button-3>",
                     lambda e, p=original_path: self._select_single(p, frame))
                 frame.bind("<Button-3>",
                     lambda e, p=original_path, f=frame: self._select_single(p, f))
-
-                # 悬浮提示
-                tip = "左键放大 | 右键选中还原"
-                canvas.bind("<Enter>", lambda e, t=tip: self._show_tip(t))
             else:
                 ctk.CTkLabel(self.dup_scroll, text=f"[无预览] {os.path.basename(original_path)}",
                               text_color="#6B7280").pack(anchor="w", padx=8, pady=4)
 
     def _select_single(self, path: str, frame=None):
-        """选中单张图片用于还原。"""
+        """选中单张图片用于还原 — 边框变蓝高亮。"""
+        # 重置之前的选中 frame
+        if self._selected_frame and self._selected_frame != frame:
+            try:
+                self._selected_frame.configure(border_color="#4B5563", border_width=2)
+            except Exception:
+                pass
+
+        # 高亮当前选中
+        if frame:
+            frame.configure(border_color="#3B82F6", border_width=3)
+            self._selected_frame = frame
+
         self.selected_single_img = path
         self.undo_file_btn.configure(state="normal")
         self._log(f"选中单张: {os.path.basename(path)}")
-
-    def _show_tip(self, text: str):
-        """显示悬浮提示（简单实现）。"""
-        pass  # 可扩展为 tooltip
 
     def _clear_preview(self):
         """清空预览区。"""

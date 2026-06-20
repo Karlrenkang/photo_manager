@@ -314,17 +314,24 @@ class SimilarAdapter:
         return groups
 
     def _find_keeper_from_moved(self, duplicates: List[Dict], source_dir: str) -> str:
-        """从源目录推断 keeper（未被移动的最大文件）。"""
+        """从源目录推断 keeper（与副本文件名模式相似且未被移动的文件）。"""
         if not duplicates:
             return ""
 
-        # 从 moved_path 推断原始文件名模式
+        # 从第一个副本的文件名提取模式（如 IMG_20250825_134956 → IMG_20250825）
         first_moved = duplicates[0]["moved_path"]
         filename = os.path.basename(first_moved)
+        stem = os.path.splitext(filename)[0]
 
-        # 在源目录中查找同名或相似文件
+        # 提取前缀模式（去掉末尾的数字部分）
+        import re
+        match = re.match(r"^(.+?)_\d+$", stem)
+        prefix = match.group(1) if match else stem[:15]  # 取前15字符作为前缀
+
         src = Path(source_dir)
         candidates = []
+        moved_files = {os.path.basename(d["moved_path"]) for d in duplicates}
+
         try:
             for f in src.rglob("*"):
                 if not f.is_file():
@@ -333,21 +340,38 @@ class SimilarAdapter:
                     continue
                 if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp", ".tiff", ".tif"):
                     continue
+
+                fname = f.name
                 # 排除已移动的副本
-                moved_paths = {d["moved_path"] for d in duplicates}
-                if str(f) in moved_paths:
+                if fname in moved_files:
                     continue
-                try:
-                    size = f.stat().st_size
-                    candidates.append((str(f), size))
-                except Exception:
-                    pass
+
+                # 检查文件名是否与前缀相似
+                f_stem = os.path.splitext(fname)[0]
+                if prefix and f_stem.startswith(prefix[:10]):
+                    try:
+                        size = f.stat().st_size
+                        candidates.append((str(f), size))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
         if not candidates:
+            # 兜底：返回源目录中最大的文件
+            try:
+                for f in src.rglob("*"):
+                    if f.is_file() and "similar_photos" not in str(f):
+                        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".heic"):
+                            if f.name not in moved_files:
+                                candidates.append((str(f), f.stat().st_size))
+            except Exception:
+                pass
+
+        if not candidates:
             return ""
 
+        # 按体积降序，取最大的作为 keeper
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
 
@@ -447,16 +471,38 @@ class SimilarAdapter:
         return groups
 
     def _find_keeper(self, duplicates: List[Dict]) -> str:
-        """从副本原始目录中推断 keeper 路径（未被移动的最大文件）。"""
+        """从副本原始目录中推断 keeper 路径。
+
+        策略：
+        1. 优先按文件名模式匹配（去掉 _1/_2 后缀）
+        2. 兜底：取未被移动的最大文件
+        """
         if not duplicates:
             return ""
-        # 取第一个副本的原始目录
+
         first_orig = duplicates[0]["original_path"]
         src_dir = os.path.dirname(first_orig)
         if not os.path.isdir(src_dir):
             return ""
 
-        # 收集该目录下所有图片文件
+        moved_paths = {d["original_path"] for d in duplicates}
+
+        # 策略 1：按文件名模式推断
+        # 例如副本是 "IMG_001_1.jpg"，keeper 可能是 "IMG_001.jpg"
+        for dup in duplicates:
+            orig = dup["original_path"]
+            name = os.path.basename(orig)
+            stem, ext = os.path.splitext(name)
+            # 尝试去掉末尾的 _数字 后缀
+            import re
+            match = re.match(r"^(.+?)_\d+$", stem)
+            if match:
+                base_name = match.group(1) + ext
+                keeper_candidate = os.path.join(src_dir, base_name)
+                if os.path.exists(keeper_candidate) and keeper_candidate not in moved_paths:
+                    return keeper_candidate
+
+        # 策略 2：兜底 - 取未被移动的最大文件
         candidates = []
         try:
             for f in os.listdir(src_dir):
@@ -464,11 +510,8 @@ class SimilarAdapter:
                 if os.path.isfile(fp) and f.lower().endswith(
                     (".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp", ".tiff", ".tif")
                 ):
-                    # 排除已在 similar_photos 中的文件
                     if "similar_photos" in fp:
                         continue
-                    # 排除已移动的副本
-                    moved_paths = {d["original_path"] for d in duplicates}
                     if fp in moved_paths:
                         continue
                     try:
@@ -482,7 +525,6 @@ class SimilarAdapter:
         if not candidates:
             return ""
 
-        # 按体积降序，取最大的作为 keeper
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
 
